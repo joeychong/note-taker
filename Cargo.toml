@@ -1,0 +1,47 @@
+[package]
+name = "note-taker"
+version = "0.1.0"
+edition = "2024"
+description = "Native system audio transcription with ElevenLabs Scribe Live"
+
+[[bin]]
+name = "stt"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "fs", "io-util", "io-std", "net", "test-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-util = { version = "0.3", features = ["sink"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.23"
+rubato = "5.1"
+audioadapter-buffers = "5.2"
+time = { version = "0.3", features = ["formatting"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+unicode-width = "0.2"
+cpal = { version = "0.18", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "11", features = ["macos_13_0"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wasapi = "0.27"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Performance", "Win32_System_Threading", "Win32_System_Console"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
