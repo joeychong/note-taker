@@ -108,6 +108,44 @@ fn silent_timeline_and_late_audio_are_explicit() {
 }
 
 #[test]
+fn timeline_preserves_audio_across_a_long_idle_period() {
+    let mut timeline = Timeline::new(200, 100.0).unwrap();
+    let frame = |timestamp, level| AudioFrame {
+        sample_rate: 48000,
+        channels: 2,
+        samples: vec![level; 4800 * 2],
+        timestamp,
+    };
+    let mut bytes: Vec<u8> = timeline
+        .push(frame(100.0, 0.25))
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect();
+    // Model the pipeline's 100 ms idle ticks while WASAPI delivers no packets.
+    // A long idle is valid even though a single unaccounted clock jump is not.
+    for tick in 1..=300 {
+        bytes.extend(timeline.idle(100.1 + tick as f64 / 10.0).unwrap().concat());
+    }
+    // Resuming leaves a 300 ms gap beyond the last synthesized silence.
+    bytes.extend(timeline.push(frame(130.1, 0.5)).unwrap().concat());
+    bytes.extend(timeline.finish().unwrap().concat());
+
+    assert_eq!(bytes.len(), 302 * 1600 * 2); // 30.2 seconds at 16 kHz mono.
+    let samples: Vec<_> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|sample| i16::from_le_bytes(*sample))
+        .collect();
+    // Check away from resampler transitions: both speech segments survive,
+    // and the long interval between them remains silent.
+    assert!(samples[400..1200].iter().all(|sample| *sample > 7000));
+    assert!(samples[16000..480000].iter().all(|sample| *sample == 0));
+    assert!(samples[482000..482800].iter().all(|sample| *sample > 15000));
+}
+
+#[test]
 fn mixer_aligns_tracks_averages_without_clipping_and_flushes_a_short_tail() {
     use note_taker::audio::mixer::Mixer;
     let mut mixer = Mixer::new(2, 100).unwrap();

@@ -223,11 +223,16 @@ impl Loopback {
                 !info.flags.timestamp_error,
                 "WASAPI reported an unreliable audio timestamp. {DEVICE_HELP}"
             );
-            // The initial packet may carry a discontinuity flag at stream startup.
-            ensure!(
-                !self.seen_packet || !info.flags.data_discontinuity,
-                "WASAPI reported a capture discontinuity; audio may have been lost. {DEVICE_HELP}"
-            );
+            // Loopback can stop producing packets while the output is idle and
+            // flag a discontinuity when playback resumes. Keep this packet:
+            // the timeline already synthesizes silence during idle periods and
+            // fills remaining gaps using the validated QPC timestamp.
+            // The initial packet may also carry this flag at stream startup.
+            if self.seen_packet && info.flags.data_discontinuity {
+                tracing::warn!(
+                    "WASAPI capture discontinuity; continuing with timestamp-aligned audio. Output may have been idle or audio may be missing."
+                );
+            }
             self.seen_packet = true;
             // read_from_device already zeroes SILENT buffers, including null data pointers.
             let packet = WindowsPacket {
