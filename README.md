@@ -74,9 +74,11 @@ Configuration precedence is **CLI arguments → existing environment → .env �
 | `STT_VAD_SILENCE` | `1.0` | Server VAD silence, 0.192–3.0 seconds |
 | `STT_OUTPUT_FORMAT` | `txt` | `txt` or `jsonl`; JSONL requires an output file |
 | `STT_LOG_LEVEL` | `info` | tracing filter, e.g. `warn` or `debug` |
-| `STT_LANGUAGE` | automatic detection | Optional two- or three-letter language code |
+| `STT_LANGUAGE` | automatic detection | Optional comma-separated two- or three-letter language codes, e.g. `en,ms,zh`; first is primary |
 
 `devices`, help, and version do not require an API key. Output format defaults to TXT regardless of the filename extension.
+
+Use `stt listen --language en,ms,zh` or `STT_LANGUAGE=en,ms,zh` in `.env` to supply expected languages. The first code is sent as the primary language and the remaining codes as secondary language hints. Multiple languages also enable Scribe v3 Live multilingual mode to follow language switches within a sentence. A CLI language list replaces the entire environment list. Omit the setting for automatic language detection. Transcripts retain the spoken languages; this does not translate them. Multilingual mode can also pick up background speech and misrecognize short phrases.
 
 ## macOS permissions and sources
 

@@ -105,9 +105,9 @@ pub struct ListenArgs {
     /// Silence duration in seconds before committing speech (0.192–3.0)
     #[arg(long, env = "STT_VAD_SILENCE", default_value_t = 1.0, value_parser = parse_vad)]
     pub vad_silence: f64,
-    /// ISO language code; omit for automatic language detection
-    #[arg(long, env = "STT_LANGUAGE", value_parser = parse_language)]
-    pub language: Option<String>,
+    /// Comma-separated language codes (e.g. en,ms,zh); first is primary; omit for auto detection
+    #[arg(long, env = "STT_LANGUAGE", value_delimiter = ',', value_parser = parse_language)]
+    pub language: Vec<String>,
     /// Append finalized transcripts while continuing terminal output
     #[arg(long)]
     pub output: Option<PathBuf>,
@@ -138,6 +138,7 @@ fn parse_vad(s: &str) -> Result<f64, String> {
 }
 
 fn parse_language(s: &str) -> Result<String, String> {
+    let s = s.trim();
     if (2..=3).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphabetic()) {
         Ok(s.to_ascii_lowercase())
     } else {

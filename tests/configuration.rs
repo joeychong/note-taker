@@ -36,6 +36,30 @@ fn cli_overrides_environment_which_overrides_dotenv() {
 }
 
 #[test]
+fn language_lists_load_from_dotenv_and_cli_replaces_environment() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join(".env"), "STT_LANGUAGE=en,ms,zh\n").unwrap();
+    let run = |language: Option<&str>, options: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_stt"));
+        command
+            .current_dir(directory.path())
+            .env("ELEVENLABS_API_KEY", "")
+            .env_remove("STT_LANGUAGE")
+            .args(["listen"])
+            .args(options);
+        if let Some(language) = language {
+            command.env("STT_LANGUAGE", language);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        String::from_utf8(output.stderr).unwrap()
+    };
+    assert!(run(None, &[]).contains("ELEVENLABS_API_KEY is empty"));
+    assert!(run(Some("invalid"), &[]).contains("invalid"));
+    assert!(run(Some("invalid"), &["--language", "en,zh"]).contains("ELEVENLABS_API_KEY is empty"));
+}
+
+#[test]
 fn jsonl_without_destination_is_rejected_before_connecting() {
     let directory = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_stt"))

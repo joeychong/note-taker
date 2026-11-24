@@ -26,8 +26,14 @@ pub fn connection_url(endpoint: &str, args: &ListenArgs) -> Result<url::Url> {
             .append_pair("commit_strategy", "vad")
             .append_pair("vad_silence_threshold_secs", &args.vad_silence.to_string())
             .append_pair("keepalive_interval_ms", "5000");
-        if let Some(language) = &args.language {
+        if let Some((language, secondary_languages)) = args.language.split_first() {
             query.append_pair("language_code", language);
+            for secondary in secondary_languages {
+                query.append_pair("secondary_languages", secondary);
+            }
+            if !secondary_languages.is_empty() {
+                query.append_pair("multilang_mode", "true");
+            }
         }
         if args.diarize {
             query.append_pair("diarize", "true");

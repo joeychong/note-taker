@@ -47,6 +47,50 @@ fn chunk_protocol_and_query_are_documented_shapes() {
 }
 
 #[test]
+fn language_lists_configure_primary_secondary_and_multilingual_mode() {
+    for (options, expected) in [
+        (vec![], vec![]),
+        (vec!["--language", "EN"], vec!["en"]),
+        (vec!["--language", "EN, ms,zh"], vec!["en", "ms", "zh"]),
+        (
+            vec!["--language", "en", "--language", "ms,zh"],
+            vec!["en", "ms", "zh"],
+        ),
+    ] {
+        let Command::Listen(args) = Cli::try_parse_from([vec!["stt", "listen"], options].concat())
+            .unwrap()
+            .command
+        else {
+            unreachable!()
+        };
+        assert_eq!(args.language, expected);
+        let url = connection_url("wss://example.com/realtime", &args).unwrap();
+        let values = |name: &str| -> Vec<String> {
+            url.query_pairs()
+                .filter(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+                .collect()
+        };
+        assert_eq!(values("language_code"), expected[..expected.len().min(1)]);
+        assert_eq!(
+            values("secondary_languages"),
+            expected.get(1..).unwrap_or(&[])
+        );
+        assert_eq!(
+            values("multilang_mode"),
+            if expected.len() > 1 {
+                vec!["true"]
+            } else {
+                vec![]
+            }
+        );
+    }
+    for languages in ["en,invalid", "en,", ",en", "en,,zh", "en,12"] {
+        assert!(Cli::try_parse_from(["stt", "listen", "--language", languages]).is_err());
+    }
+}
+
+#[test]
 fn event_schemas_errors_and_metadata() {
     assert_eq!(
         parse(r#"{"message_type":"partial_transcript","text":"hi"}"#)
