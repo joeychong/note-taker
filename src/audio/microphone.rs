@@ -1,6 +1,6 @@
-use super::{
-    AudioCapture, AudioFrame, AudioPacket, AudioSource, CaptureSession, CapturedPacket, backend,
-};
+#[cfg(target_os = "macos")]
+use super::backend;
+use super::{AudioCapture, AudioFrame, AudioPacket, AudioSource, CaptureSession, CapturedPacket};
 use anyhow::{Context, Result, anyhow, ensure};
 use cpal::{
     SampleFormat, StreamInstant,
@@ -16,6 +16,23 @@ use std::{
 use tokio::sync::{Semaphore, mpsc};
 
 const HELP: &str = "Check microphone privacy permission for the launching app and reconnect/select an available input device. On macOS use System Settings → Privacy & Security → Microphone; on Windows check microphone access for desktop apps.";
+
+#[cfg(any(target_os = "windows", test))]
+fn qpc_microphone_timestamp(
+    previous: &mut Option<StreamInstant>,
+    stamp: cpal::InputStreamTimestamp,
+) -> Result<f64> {
+    ensure!(
+        previous.is_none_or(|last| stamp.capture >= last),
+        "Microphone source clock moved backwards"
+    );
+    *previous = Some(stamp.capture);
+    // CPAL's WASAPI capture instant is GetBuffer's QPC timestamp, already on
+    // the same clock as system loopback and backend::host_seconds(). Its
+    // callback instant comes from a separate IAudioClock::GetPosition call;
+    // do not use that device-clock snapshot to validate or rebase capture time.
+    Ok(stamp.capture.as_nanos() as f64 / 1_000_000_000.0)
+}
 
 pub fn devices() -> Result<Vec<AudioSource>> {
     let host = cpal::default_host();
@@ -128,7 +145,10 @@ impl PreparedMicrophone {
         let accepting = Arc::new(AtomicBool::new(false));
         let enabled = accepting.clone();
         let budget = Arc::new(Semaphore::new(rate as usize));
+        #[cfg(target_os = "macos")]
         let mut clock: Option<(StreamInstant, f64)> = None;
+        #[cfg(target_os = "windows")]
+        let mut clock: Option<StreamInstant> = None;
         let stream = device
             .build_input_stream_raw(
                 supported.into(),
@@ -148,20 +168,30 @@ impl PreparedMicrophone {
                         return;
                     }
                     let stamp = info.timestamp();
-                    if stamp.callback.checked_duration_since(stamp.capture).is_none()
-                        || clock.is_some_and(|(origin, _)| stamp.capture.checked_duration_since(origin).is_none()) {
-                        let _ = callback_errors.try_send(anyhow!("Microphone source clock moved backwards or returned inconsistent timestamps"));
-                        return;
-                    }
-                    let (native_origin, host_origin) = *clock.get_or_insert_with(|| {
-                        (
-                            stamp.capture,
-                            backend::host_seconds()
-                                - stamp.callback.duration_since(stamp.capture).as_secs_f64(),
-                        )
-                    });
-                    let timestamp =
-                        host_origin + stamp.capture.duration_since(native_origin).as_secs_f64();
+                    #[cfg(target_os = "windows")]
+                    let timestamp = match qpc_microphone_timestamp(&mut clock, stamp) {
+                        Ok(timestamp) => timestamp,
+                        Err(error) => {
+                            let _ = callback_errors.try_send(error);
+                            return;
+                        }
+                    };
+                    #[cfg(target_os = "macos")]
+                    let timestamp = {
+                        if stamp.callback.checked_duration_since(stamp.capture).is_none()
+                            || clock.is_some_and(|(origin, _)| stamp.capture.checked_duration_since(origin).is_none()) {
+                            let _ = callback_errors.try_send(anyhow!("Microphone source clock moved backwards or returned inconsistent timestamps"));
+                            return;
+                        }
+                        let (native_origin, host_origin) = *clock.get_or_insert_with(|| {
+                            (
+                                stamp.capture,
+                                backend::host_seconds()
+                                    - stamp.callback.duration_since(stamp.capture).as_secs_f64(),
+                            )
+                        });
+                        host_origin + stamp.capture.duration_since(native_origin).as_secs_f64()
+                    };
                     match budget.clone().try_acquire_many_owned(count as u32) {
                         Ok(permit) => {
                             let packet = MicrophonePacket {
@@ -240,5 +270,44 @@ impl AudioCapture for MicrophoneCapture {
 impl Drop for MicrophoneCapture {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cpal::InputStreamTimestamp;
+
+    #[test]
+    fn wasapi_capture_uses_shared_qpc_clock_even_when_callback_lags() {
+        let mut previous = None;
+        // Host uptime, rather than time relative to stream startup. A stale
+        // callback clock must neither reject PCM nor offset it from loopback.
+        for millis in [123_450, 123_460, 123_480] {
+            let stamp = InputStreamTimestamp {
+                capture: StreamInstant::from_millis(millis),
+                callback: StreamInstant::from_millis(123_440),
+            };
+            let actual = qpc_microphone_timestamp(&mut previous, stamp).unwrap();
+            assert!((actual - millis as f64 / 1000.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn wasapi_capture_rejects_regression_between_consecutive_packets() {
+        let mut previous = None;
+        for millis in [1000, 1020] {
+            let stamp = InputStreamTimestamp {
+                capture: StreamInstant::from_millis(millis),
+                callback: StreamInstant::from_millis(millis + 10),
+            };
+            qpc_microphone_timestamp(&mut previous, stamp).unwrap();
+        }
+        let regressed = InputStreamTimestamp {
+            capture: StreamInstant::from_millis(1010),
+            callback: StreamInstant::from_millis(1040),
+        };
+        assert!(qpc_microphone_timestamp(&mut previous, regressed).is_err());
+        assert_eq!(previous, Some(StreamInstant::from_millis(1020)));
     }
 }
