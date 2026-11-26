@@ -15,7 +15,38 @@ use std::{
 };
 use tokio::sync::{Semaphore, mpsc};
 
-const HELP: &str = "Check microphone privacy permission for the launching app and reconnect/select an available input device. On macOS use System Settings → Privacy & Security → Microphone; on Windows check microphone access for desktop apps.";
+#[cfg(target_os = "macos")]
+const DEVICE_HELP: &str = "Check System Settings → Sound → Input. Reconnect the microphone or select an available input using stt devices --audio-source microphone and --microphone-device <ID>.";
+#[cfg(target_os = "windows")]
+const DEVICE_HELP: &str = "Check Settings → System → Sound → Input and test the microphone. Reconnect the microphone or select an available input using stt devices --audio-source microphone and --microphone-device <ID>. If it still fails, check the audio driver and Windows Audio service.";
+
+#[cfg(target_os = "macos")]
+const PERMISSION_HELP: &str = "Open System Settings → Privacy & Security → Microphone and allow access for the app launching stt (for example, Terminal). Restart that app after changing permission.";
+#[cfg(target_os = "windows")]
+const PERMISSION_HELP: &str = "Open Windows microphone privacy settings (Settings → Privacy & security → Microphone on Windows 11). Enable microphone access and Let desktop apps access your microphone. If your Windows build shows a separate permission for this app, allow it too.";
+
+fn microphone_error(operation: &str, error: cpal::Error) -> anyhow::Error {
+    let help = if error.kind() == cpal::ErrorKind::PermissionDenied {
+        PERMISSION_HELP
+    } else {
+        DEVICE_HELP
+    };
+    anyhow!("{operation}: {error}. {help}")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn handle_wasapi_microphone_error(error: cpal::Error, errors: &mpsc::Sender<anyhow::Error>) {
+    if error.kind() == cpal::ErrorKind::Xrun {
+        // WASAPI reports a packet discontinuity through CPAL's error callback
+        // and then continues capture. Keep receiving PCM; the timeline fills
+        // short timestamp gaps with silence and rejects unsafe clock jumps.
+        tracing::warn!(
+            "Microphone capture discontinuity; continuing with timestamp-aligned audio. Audio may be missing."
+        );
+        return;
+    }
+    let _ = errors.try_send(microphone_error("Microphone stream failed", error));
+}
 
 #[cfg(any(target_os = "windows", test))]
 fn qpc_microphone_timestamp(
@@ -53,7 +84,7 @@ pub fn devices() -> Result<Vec<AudioSource>> {
     }
     ensure!(
         !result.is_empty(),
-        "No microphone input device is available. {HELP}"
+        "No microphone input device is available. {DEVICE_HELP}"
     );
     Ok(result)
 }
@@ -127,10 +158,10 @@ impl PreparedMicrophone {
             )?;
             host.device_by_id(&id.parse().context("Invalid microphone device ID")?)
         }
-        .with_context(|| format!("Selected microphone is unavailable. {HELP}"))?;
+        .with_context(|| format!("Selected microphone is unavailable. {DEVICE_HELP}"))?;
         let supported = device
             .default_input_config()
-            .with_context(|| format!("Cannot read microphone format. {HELP}"))?;
+            .map_err(|error| microphone_error("Cannot read microphone format", error))?;
         let rate = supported.sample_rate();
         let channels = supported.channels() as usize;
         let format = supported.sample_format();
@@ -221,11 +252,14 @@ impl PreparedMicrophone {
                     }
                 },
                 move |error| {
-                    let _ = error_tx.try_send(anyhow!("Microphone stream failed: {error}. {HELP}"));
+                    #[cfg(target_os = "windows")]
+                    handle_wasapi_microphone_error(error, &error_tx);
+                    #[cfg(target_os = "macos")]
+                    let _ = error_tx.try_send(microphone_error("Microphone stream failed", error));
                 },
                 Some(Duration::from_secs(10)),
             )
-            .with_context(|| format!("Cannot prepare microphone capture. {HELP}"))?;
+            .map_err(|error| microphone_error("Cannot prepare microphone capture", error))?;
         Ok(Self {
             stream: Some(stream),
             accepting,
@@ -241,7 +275,7 @@ impl PreparedMicrophone {
             .as_ref()
             .expect("prepared stream")
             .play()
-            .with_context(|| format!("Cannot start microphone. {HELP}"))?;
+            .map_err(|error| microphone_error("Cannot start microphone", error))?;
         Ok(CaptureSession {
             sample_rate: self.rate,
             frames: self.frames.take().expect("prepared receiver"),
@@ -277,6 +311,37 @@ impl Drop for MicrophoneCapture {
 mod tests {
     use super::*;
     use cpal::InputStreamTimestamp;
+
+    #[test]
+    fn wasapi_xruns_do_not_stop_capture_or_hide_a_later_device_failure() {
+        let (errors, mut receiver) = mpsc::channel(1);
+        for _ in 0..3 {
+            handle_wasapi_microphone_error(cpal::ErrorKind::Xrun.into(), &errors);
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+        handle_wasapi_microphone_error(cpal::ErrorKind::DeviceNotAvailable.into(), &errors);
+        let error = receiver.try_recv().unwrap().to_string();
+        assert!(error.contains("Microphone stream failed"));
+        assert!(error.contains("disconnected"));
+    }
+
+    #[test]
+    fn wasapi_other_stream_errors_remain_fatal_regardless_of_message() {
+        for kind in [
+            cpal::ErrorKind::PermissionDenied,
+            cpal::ErrorKind::StreamInvalidated,
+            cpal::ErrorKind::BackendError,
+        ] {
+            let (errors, mut receiver) = mpsc::channel(1);
+            // Classification must use the error kind rather than match text.
+            let error = cpal::Error::with_message(kind, "A buffer underrun or overrun occurred.");
+            handle_wasapi_microphone_error(error, &errors);
+            assert!(receiver.try_recv().is_ok(), "lost fatal error {kind:?}");
+        }
+    }
 
     #[test]
     fn wasapi_capture_uses_shared_qpc_clock_even_when_callback_lags() {
